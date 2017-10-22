@@ -10,18 +10,32 @@
 #include <sys/conf.h>
 #include <sys/ioccom.h>
 
-static int bytes = 0;
-static char* byteBuffer = NULL;
+
+#include <sys/errno.h>
+#include <sys/malloc.h>
+#include <sys/sysent.h>
+#include <sys/sysproto.h>
+#include <sys/proc.h>
+#include <sys/syscall.h>
+
+#include <netinet/in_systm.h>
+#include <netinet/in.h>
+#include <netinet/ip.h>
+#include <net/if.h>
+#include <net/pfil.h>
+
+#define MINOR 11
+
+
+static char* byte_buffer = NULL;
 static int count = 0;
 static struct cdev* sdev;
+static int packet_counter = 0;
 
-static struct cdevsw filter = {
-	.d_version = D_VERSION,
-	.d_open = open,
-	.d_close = close,
-	.d_read = read.
-	.d_name = "filter"
-};
+
+d_open_t open;
+d_close_t close;
+d_read_t read;
 
 int open(struct cdev* dev, int flag, int otyp, struct thread* td){
 
@@ -32,7 +46,7 @@ int open(struct cdev* dev, int flag, int otyp, struct thread* td){
 	count = 1;
 	return err;
 
-} 
+}
 
 int close(struct cdev* dev, int fflag, int devtype, struct thread* td){
 
@@ -45,18 +59,27 @@ int close(struct cdev* dev, int fflag, int devtype, struct thread* td){
 int read(struct cdev* dev, struct uio* uio, int ioflag){
 
 	int size = 0;
-	sprintf(byteBuffer, "%016d,%016d\n", bytes);
-	size = uiomove(byteBuffer, MIN(uio-uio_resid, 
-strlen(byteBuffer)), uio);
+	sprintf(byte_buffer, "%d\n", packet_counter);
+	size = uiomove(byte_buffer, MIN(uio->uio_resid, 
+strlen(byte_buffer)), uio);
 	return size;
 
 }
 
+
+static struct cdevsw filter = {
+	.d_version = D_VERSION,
+	.d_open = open,
+	.d_close = close,
+	.d_read = read,
+	.d_name = "filter"
+};
+
+
 static int packetFilter(void* arg, struct mbuf** m, struct ifnet* ifp, 
 int dir, struct inpcb* inp){
-
-	bytes += (*m)->m_len;
-	uprintf("This is a test:%d", bytes);
+	
+	packet_counter++;
 	return 0;
 
 }
@@ -65,6 +88,9 @@ static int deinitializeFilter(void){
 	struct pfil_head* ptrhead;
 	ptrhead = pfil_head_get(PFIL_TYPE_AF, AF_INET);
 	pfil_remove_hook(packetFilter, NULL, PFIL_IN, ptrhead);
+
+	free(byte_buffer, M_TEMP);
+	destroy_dev(sdev);
 	return 0;
 }
 
@@ -76,9 +102,17 @@ static int initializeFilter(void){
 		return ENOENT;
 	}
 	pfil_add_hook(packetFilter, NULL, PFIL_IN, ptrhead);
+	byte_buffer = (void*)malloc(PAGE_SIZE, M_TEMP, M_WAITOK);
+		sdev = make_dev(&filter,
+				MINOR,
+				UID_ROOT,
+				GID_WHEEL,
+				0600,
+				"FILTER");
+		uprintf("Loaded");
 		return 0;
+	
 }
-
 
 
 static int eventHandler(struct module *module, int event, void* addInfo){
